@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "sync/**"]
   pull_request:
     branches: ["main"]
 
@@ -18,31 +18,51 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install package and test dependencies
         run: |
-          pip install -e .
-          pip install dash plotly
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
 
-      - name: Smoke test — build network and run I-V sweep
+      - name: Run regression tests
+        run: pytest -q
+
+      - name: Smoke test package API
         run: |
-          python - <<'EOF'
+          python - <<'PY'
           from nanonet import NanoparticleNetwork, sweep
 
-          net = NanoparticleNetwork(L=1.0, N=100, mu_a=6.0, std_a=3.0).build(seed=42)
-          assert net.G.number_of_nodes() > 0, "No nodes built"
-          assert net.source_nodes, "No source nodes"
-          assert net.drain_nodes, "No drain nodes"
+          net = NanoparticleNetwork(
+              L=1.0,
+              N=100,
+              mu_a=6.0,
+              std_a=3.0,
+              node_resistance_ohm=3.5e9,
+          ).build(seed=42)
+          assert net.G.number_of_nodes() > 0
+          assert net.source_nodes
+          assert net.drain_nodes
 
           iv = net.iv_curve(V_start=0.0, V_max=16.0, V_step=0.5)
-          assert len(iv["voltages"]) > 0, "Empty IV curve"
+          evo = sweep(
+              net, 0.0, 16.0, 0.5,
+              effective_resistance=False,
+              algebraic_connectivity=False,
+          )
+          assert len(iv["voltages"]) == len(evo["rows"])
+          assert iv["threshold_voltage"] == evo["percolation_V"]
 
-          evo = sweep(net, 0.0, 16.0, 0.5, effective_resistance=False, algebraic_connectivity=False)
-          assert len(evo["rows"]) > 0, "Empty sweep"
+          connected_rows = [r for r in evo["rows"] if r["source_drain_connected"]]
+          if connected_rows:
+              row = connected_rows[0]
+              assert row["current_balance_error_A"] >= 0.0
+              assert row["N_eff"] >= 0.0
 
-          print(f"OK — {net.G.number_of_nodes()} nodes, "
-                f"{net.G.number_of_edges()} edges, "
-                f"threshold_voltage={iv['threshold_voltage']}")
-          EOF
+          print(
+              f"OK: {net.G.number_of_nodes()} nodes, "
+              f"{net.G.number_of_edges()} edges, "
+              f"Vperc={iv['threshold_voltage']}"
+          )
+          PY
 
-      - name: Smoke test — app imports cleanly
+      - name: Smoke test app import
         run: python -c "import app; print('app import OK')"
