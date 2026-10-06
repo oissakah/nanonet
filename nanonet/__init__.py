@@ -42,12 +42,19 @@ Create and analyse a network:
 """
 
 from nanonet.core.network import NanoparticleNetwork
-from nanonet.analysis.sweep import sweep, write_csv, write_iv_csv, write_edge_currents_csv
+from nanonet.analysis.sweep import (
+    sweep,
+    count_edge_disjoint_pathways,
+    write_csv,
+    write_iv_csv,
+    write_edge_currents_csv,
+)
 from nanonet.analysis.spectral import effective_resistance, spectral_metrics
 from nanonet.sweeps.parameter_sweep import (
     SweepConfig,
     run_sweep_vary_std,
     run_sweep_vary_mean,
+    run_sweep_vary_N_mean,
     run_sweep_vary_N,
     run_sweep_vary_voids,
     run_all_cases,
@@ -60,13 +67,14 @@ from nanonet.visualization.plots import (
     plot_spectral_evolution,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     # Core
     "NanoparticleNetwork",
     # Analysis
     "sweep",
+    "count_edge_disjoint_pathways",
     "write_csv",
     "write_iv_csv",
     "write_edge_currents_csv",
@@ -76,6 +84,7 @@ __all__ = [
     "SweepConfig",
     "run_sweep_vary_std",
     "run_sweep_vary_mean",
+    "run_sweep_vary_N_mean",
     "run_sweep_vary_N",
     "run_sweep_vary_voids",
     "run_all_cases",
