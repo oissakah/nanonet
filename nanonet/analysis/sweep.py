@@ -1,40 +1,65 @@
-"""
-nanonet.analysis.sweep
------------------------
-Per-voltage network-evolution sweep: activation metrics, Kirchhoff solve,
-current-distribution statistics, and connectivity structure.
-"""
+"""Per-voltage evolution analysis using nanonet's canonical circuit solver."""
 
 from __future__ import annotations
 
 import csv
-import numpy as np
+
 import networkx as nx
+import numpy as np
+
+
+def count_edge_disjoint_pathways(net, activated_nodes) -> int:
+    """Maximum number of edge-disjoint active source-to-drain paths."""
+    active = set(activated_nodes)
+    sources = [n for n in net.source_nodes if n in active]
+    drains = [n for n in net.drain_nodes if n in active]
+    if not sources or not drains:
+        return 0
+
+    graph = net.G.subgraph(active)
+    if graph.number_of_edges() == 0:
+        return 0
+
+    super_source = ("__electrode__", "source")
+    super_drain = ("__electrode__", "drain")
+    flow_graph = nx.DiGraph()
+    flow_graph.add_nodes_from(graph.nodes())
+    for i, j in graph.edges():
+        flow_graph.add_edge(i, j, capacity=1)
+        flow_graph.add_edge(j, i, capacity=1)
+
+    electrode_capacity = max(1, graph.number_of_edges() + 1)
+    for node in sources:
+        flow_graph.add_edge(super_source, node, capacity=electrode_capacity)
+    for node in drains:
+        flow_graph.add_edge(node, super_drain, capacity=electrode_capacity)
+
+    value = nx.maximum_flow_value(
+        flow_graph,
+        super_source,
+        super_drain,
+        capacity="capacity",
+        flow_func=nx.algorithms.flow.shortest_augmenting_path,
+    )
+    return int(round(float(value)))
 
 
 def conductance_matrix(net, activated_nodes: set, R_MIN: float = 1.0):
-    """Build the edge-only Laplacian (conductance) matrix over activated nodes.
-
-    Returns (G_dense_array, ordered_node_list).
-    """
-    active_list = sorted(activated_nodes)
-    local_idx = {v: k for k, v in enumerate(active_list)}
-    N = len(active_list)
-    G = np.zeros((N, N))
-    for i, j in net.G.edges():
-        if i in local_idx and j in local_idx:
-            g = 1.0 / max(net.G[i][j]["R_edge"], R_MIN)
-            ki, kj = local_idx[i], local_idx[j]
-            G[ki, ki] += g; G[kj, kj] += g
-            G[ki, kj] -= g; G[kj, ki] -= g
-    return G, active_list
+    """Return the exact conductance-weighted active-circuit Laplacian."""
+    del R_MIN
+    system = net.build_active_laplacian(activated_nodes)
+    if system is None:
+        return np.zeros((0, 0)), []
+    return system["laplacian"].toarray(), system["nodes"]
 
 
 def _edge_currents_at(net, activated_nodes: set, V_applied: float):
-    """Return (total_current, node_potentials, edge_currents) for one voltage."""
-    total_I, phi = net._solve_kirchhoff(activated_nodes, V_applied)
-    ec = net._reconstruct_edge_currents(activated_nodes, V_applied, phi)
-    return total_I, phi, ec
+    solution = net.solve_active_network(activated_nodes, V_applied)
+    return (
+        solution["total_current_A"],
+        solution["node_potentials"],
+        solution["edge_currents"],
+    )
 
 
 def sweep(
@@ -49,67 +74,38 @@ def sweep(
     effective_resistance: bool = True,
     algebraic_connectivity: bool = True,
 ) -> dict:
-    """Run a full voltage sweep and collect per-voltage metrics.
-
-    Parameters
-    ----------
-    net : NanoparticleNetwork
-    V_start, V_max, V_step : float
-        Voltage sweep parameters [V].
-    current_frac : float
-        Backbone edge threshold: edges carrying >= current_frac * I_max.
-    G_voltages : list of float, optional
-        Voltages at which to export the conductance matrix to disk.
-    G_out_prefix : str, optional
-        File-path prefix for conductance-matrix output files.
-    effective_resistance : bool
-        Compute source-to-drain effective resistance (one extra linear solve).
-    algebraic_connectivity : bool
-        Compute Fiedler value and spectral gap ratio (expensive: dense eig).
-
-    Returns
-    -------
-    dict with keys:
-        rows              : list of per-voltage metric dicts
-        fieldnames        : column names (for CSV export)
-        edge_currents_by_V: {voltage: {(i,j): current}}
-        percolation_V     : float or None
-        n_total_nodes     : int
-        n_total_edges     : int
-    """
+    """Run a voltage sweep and collect topology, current, and spectral metrics."""
     if not net.source_nodes or not net.drain_nodes:
         raise ValueError("Call identify_sources_drains() (or build()) first.")
 
-    G_voltages_set = set(round(float(v), 10) for v in (G_voltages or []))
-    rows: list = []
-    edge_currents_by_V: dict = {}
+    G_voltages_set = {round(float(v), 10) for v in (G_voltages or [])}
+    rows = []
+    edge_currents_by_V = {}
     percolation_V = None
+    percolation_pathways = 0
+    percolation_active_nodes = 0
     n_total_nodes = net.G.number_of_nodes()
     n_total_edges = net.G.number_of_edges()
 
-    V = V_start
-    while V <= V_max + 1e-10:
-        Vr = round(V, 10)
-        activated_nodes = {n for n in net.G.nodes() if net.G.nodes[n]["Vth"] <= Vr}
-        activated_edges = [(i, j) for i, j in net.G.edges()
-                           if i in activated_nodes and j in activated_nodes]
+    voltage = float(V_start)
+    while voltage <= float(V_max) + 1e-10:
+        Vr = round(voltage, 10)
+        activated_nodes = net.activated_nodes(Vr)
+        activated_edges = [
+            (i, j) for i, j in net.G.edges()
+            if i in activated_nodes and j in activated_nodes
+        ]
 
         G_act = net.G.subgraph(activated_nodes)
-        src_comp: set = set()
-        for s in net.source_nodes:
-            if s in G_act:
-                src_comp |= nx.node_connected_component(G_act, s)
-        drn_comp: set = set()
-        for d in net.drain_nodes:
-            if d in G_act:
-                drn_comp |= nx.node_connected_component(G_act, d)
-        connected = len(src_comp & drn_comp) > 0
+        connected = bool(net._bridging_nodes(activated_nodes))
         if connected and percolation_V is None:
             percolation_V = Vr
+            percolation_pathways = count_edge_disjoint_pathways(net, activated_nodes)
+            percolation_active_nodes = len(activated_nodes)
 
-        # Component structure
         comp_sizes = sorted(
-            (len(c) for c in nx.connected_components(G_act)), reverse=True
+            (len(component) for component in nx.connected_components(G_act)),
+            reverse=True,
         )
         num_components = len(comp_sizes)
         largest_cc_nodes = comp_sizes[0] if comp_sizes else 0
@@ -121,87 +117,108 @@ def sweep(
             float(np.mean(comp_sizes[1:])) if num_components > 1 else 0.0
         )
 
-        total_current, phi, ec = _edge_currents_at(net, activated_nodes, Vr)
-        edge_currents_by_V[Vr] = ec
+        solution = net.solve_active_network(activated_nodes, Vr)
+        total_current = solution["total_current_A"]
+        phi = solution["node_potentials"]
+        edge_currents = solution["edge_currents"]
+        edge_currents_by_V[Vr] = edge_currents
 
-        if ec:
-            mags = np.array([abs(c) for c in ec.values()])
-            max_mag = mags.max()
+        if edge_currents:
+            mags = np.asarray([abs(current) for current in edge_currents.values()])
+            max_mag = float(mags.max())
             backbone_edges = int(np.sum(mags >= current_frac * max_mag))
-            s = mags.sum()
-            participation = float((s * s) / np.sum(mags * mags)) if s > 0 else 0.0
-
-            src_set = set(net.source_nodes)
-            I_cc = 0.0
-            for (i, j), c in ec.items():
-                if i in src_set and j not in src_set:
-                    I_cc += c
-                elif j in src_set and i not in src_set:
-                    I_cc -= c
-            I_cc = abs(I_cc)
-
+            current_sum = float(mags.sum())
+            denom = float(np.sum(mags * mags))
+            participation = (
+                (current_sum * current_sum) / denom
+                if current_sum > 0 and denom > 0 else 0.0
+            )
             mean_mag = float(mags.mean())
-            max_to_mean = float(max_mag / mean_mag) if mean_mag > 0 else 0.0
+            max_to_mean = max_mag / mean_mag if mean_mag > 0 else 0.0
             cv_current = float(mags.std() / mean_mag) if mean_mag > 0 else 0.0
             sorted_mags = np.sort(mags)
             n_e = len(sorted_mags)
-            cum = np.cumsum(sorted_mags)
+            total_mag = float(sorted_mags.sum())
             gini_current = (
                 float(
-                    (2.0 * np.sum(np.arange(1, n_e + 1) * sorted_mags)
-                     - (n_e + 1) * cum[-1])
-                    / (n_e * cum[-1])
+                    (
+                        2.0 * np.sum(np.arange(1, n_e + 1) * sorted_mags)
+                        - (n_e + 1) * total_mag
+                    )
+                    / (n_e * total_mag)
                 )
-                if cum[-1] > 0 else 0.0
+                if total_mag > 0 else 0.0
             )
             k = max(1, int(np.ceil(0.10 * n_e)))
-            top10_fraction = float(sorted_mags[-k:].sum() / cum[-1]) if cum[-1] > 0 else 0.0
+            top10_fraction = (
+                float(sorted_mags[-k:].sum() / total_mag)
+                if total_mag > 0 else 0.0
+            )
         else:
-            backbone_edges = participation = I_cc = 0
-            max_to_mean = cv_current = gini_current = top10_fraction = 0.0
+            backbone_edges = 0
+            participation = 0.0
+            max_to_mean = 0.0
+            cv_current = 0.0
+            gini_current = 0.0
+            top10_fraction = 0.0
 
         if Vr in G_voltages_set and G_out_prefix and activated_nodes:
             Gmat, active_list = conductance_matrix(net, activated_nodes)
             np.save(f"{G_out_prefix}_V{Vr:g}.npy", Gmat)
-            with open(f"{G_out_prefix}_V{Vr:g}_nodeindex.csv", "w", newline="") as f:
-                w = csv.writer(f)
-                w.writerow(["matrix_index", "node_id", "is_source", "is_drain"])
-                for k_idx, nid in enumerate(active_list):
-                    w.writerow([k_idx, nid, int(nid in net.source_nodes),
-                                int(nid in net.drain_nodes)])
-            with open(f"{G_out_prefix}_V{Vr:g}.csv", "w", newline="") as f:
-                w = csv.writer(f)
-                w.writerow(["row_index", "col_index", "row_node", "col_node", "conductance_S"])
-                for ii in range(Gmat.shape[0]):
-                    for jj in range(Gmat.shape[0]):
-                        if Gmat[ii, jj] != 0.0:
-                            w.writerow([ii, jj, active_list[ii], active_list[jj], Gmat[ii, jj]])
+            with open(
+                f"{G_out_prefix}_V{Vr:g}_nodeindex.csv", "w", newline=""
+            ) as stream:
+                writer = csv.writer(stream)
+                writer.writerow(["matrix_index", "node_id", "is_source", "is_drain"])
+                for idx, node in enumerate(active_list):
+                    writer.writerow([
+                        idx, node,
+                        int(node in net.source_nodes),
+                        int(node in net.drain_nodes),
+                    ])
+            with open(f"{G_out_prefix}_V{Vr:g}.csv", "w", newline="") as stream:
+                writer = csv.writer(stream)
+                writer.writerow([
+                    "row_index", "col_index", "row_node", "col_node",
+                    "conductance_S",
+                ])
+                for i in range(Gmat.shape[0]):
+                    for j in range(Gmat.shape[1]):
+                        if Gmat[i, j] != 0.0:
+                            writer.writerow([
+                                i, j, active_list[i], active_list[j], Gmat[i, j]
+                            ])
 
         conductance = total_current / Vr if Vr > 1e-12 else 0.0
 
         R_eff = alg_conn = gap_ratio = np.nan
         if activated_nodes and (effective_resistance or algebraic_connectivity):
             from nanonet.analysis.spectral import (
-                effective_resistance as _eff_res,
-                spectral_metrics as _spec,
+                effective_resistance as _effective_resistance,
+                spectral_metrics as _spectral_metrics,
             )
             if effective_resistance:
-                R_eff = _eff_res(net, activated_nodes)
+                R_eff = _effective_resistance(net, activated_nodes, V_test=1.0)
             if algebraic_connectivity:
-                alg_conn, gap_ratio, _ = _spec(net, activated_nodes)
+                alg_conn, gap_ratio, _ = _spectral_metrics(net, activated_nodes)
 
         rows.append({
             "V": Vr,
             "activated_nodes": len(activated_nodes),
             "activated_edges": len(activated_edges),
             "conducting_nodes": len(phi),
-            "conducting_edges": len(ec),
+            "conducting_edges": len(edge_currents),
             "source_drain_connected": int(connected),
             "total_current_A": total_current,
-            "total_current_chargeconserving_A": I_cc,
+            "total_current_chargeconserving_A": total_current,
+            "source_current_A": solution["source_current_A"],
+            "drain_current_A": solution["drain_current_A"],
+            "current_balance_error_A": solution["current_balance_error_A"],
             "conductance_S": conductance,
             "backbone_edges": backbone_edges,
             "participation_ratio": participation,
+            "current_participation_ratio": participation,
+            "N_eff": participation,
             "num_components": num_components,
             "largest_cc_nodes": largest_cc_nodes,
             "second_cc_nodes": second_cc_nodes,
@@ -215,47 +232,61 @@ def sweep(
             "algebraic_connectivity": alg_conn,
             "spectral_gap_ratio": gap_ratio,
         })
-        V = round(V + V_step, 10)
+        voltage = round(voltage + float(V_step), 10)
+
+    for row in rows:
+        row["edge_disjoint_pathways_at_Vperc"] = percolation_pathways
+        row["active_nodes_at_Vperc"] = percolation_active_nodes
 
     fieldnames = [
         "V", "activated_nodes", "activated_edges", "conducting_nodes",
         "conducting_edges", "source_drain_connected", "total_current_A",
-        "total_current_chargeconserving_A", "conductance_S",
+        "total_current_chargeconserving_A", "source_current_A",
+        "drain_current_A", "current_balance_error_A", "conductance_S",
         "backbone_edges", "participation_ratio",
+        "current_participation_ratio", "N_eff",
         "num_components", "largest_cc_nodes", "second_cc_nodes",
         "largest_cc_fraction", "mean_finite_cc",
         "current_cv", "current_gini", "current_max_to_mean",
-        "current_top10_fraction",
-        "effective_resistance_ohm", "algebraic_connectivity", "spectral_gap_ratio",
+        "current_top10_fraction", "effective_resistance_ohm",
+        "algebraic_connectivity", "spectral_gap_ratio",
+        "edge_disjoint_pathways_at_Vperc", "active_nodes_at_Vperc",
     ]
+
     return {
         "rows": rows,
         "fieldnames": fieldnames,
         "edge_currents_by_V": edge_currents_by_V,
         "percolation_V": percolation_V,
+        "percolation_pathways": percolation_pathways,
+        "percolation_active_nodes": percolation_active_nodes,
         "n_total_nodes": n_total_nodes,
         "n_total_edges": n_total_edges,
     }
 
 
 def write_csv(result: dict, path: str) -> str:
-    """Write full per-voltage metrics table to CSV."""
-    with open(path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=result["fieldnames"])
-        w.writeheader()
-        for row in result["rows"]:
-            w.writerow(row)
+    with open(path, "w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=result["fieldnames"])
+        writer.writeheader()
+        writer.writerows(result["rows"])
     return path
 
 
 def write_iv_csv(result: dict, path: str) -> str:
-    """Write focused I-V table (V, current, conductance) to CSV."""
-    with open(path, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["V", "current_A", "current_chargeconserving_A", "conductance_S"])
-        for r in result["rows"]:
-            w.writerow([r["V"], r["total_current_A"],
-                        r["total_current_chargeconserving_A"], r["conductance_S"]])
+    """Write I-V data with current-conservation diagnostics."""
+    with open(path, "w", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow([
+            "V", "current_A", "source_current_A", "drain_current_A",
+            "current_balance_error_A", "conductance_S",
+        ])
+        for row in result["rows"]:
+            writer.writerow([
+                row["V"], row["total_current_A"], row["source_current_A"],
+                row["drain_current_A"], row["current_balance_error_A"],
+                row["conductance_S"],
+            ])
     return path
 
 
@@ -266,21 +297,33 @@ def write_edge_currents_csv(
     conducting_only: bool = True,
     voltages=None,
 ) -> str:
-    """Write per-edge signed currents with node positions to CSV."""
+    """Write signed per-edge currents with positions and Vperc diagnostics."""
+    del conducting_only
     pos = net.positions
-    ecbv = result["edge_currents_by_V"]
-    Vset = (set(round(float(v), 10) for v in voltages)
-            if voltages is not None else None)
-    with open(path, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["V", "node_i", "node_j", "x_i", "y_i", "x_j", "y_j",
-                    "current_A", "abs_current_A"])
-        for Vr in sorted(ecbv.keys()):
-            if Vset is not None and Vr not in Vset:
+    edge_currents_by_V = result["edge_currents_by_V"]
+    voltage_set = (
+        {round(float(v), 10) for v in voltages}
+        if voltages is not None else None
+    )
+
+    with open(path, "w", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow([
+            "V", "edge_disjoint_pathways_at_Vperc", "active_nodes_at_Vperc",
+            "node_i", "node_j", "x_i", "y_i", "x_j", "y_j",
+            "current_A", "abs_current_A",
+        ])
+        for Vr in sorted(edge_currents_by_V):
+            if voltage_set is not None and Vr not in voltage_set:
                 continue
-            for (i, j), c in ecbv[Vr].items():
-                w.writerow([Vr, i, j,
-                            f"{pos[i][0]:.6f}", f"{pos[i][1]:.6f}",
-                            f"{pos[j][0]:.6f}", f"{pos[j][1]:.6f}",
-                            f"{c:.8e}", f"{abs(c):.8e}"])
+            for (i, j), current in edge_currents_by_V[Vr].items():
+                writer.writerow([
+                    Vr,
+                    result.get("percolation_pathways", 0),
+                    result.get("percolation_active_nodes", 0),
+                    i, j,
+                    f"{pos[i][0]:.6f}", f"{pos[i][1]:.6f}",
+                    f"{pos[j][0]:.6f}", f"{pos[j][1]:.6f}",
+                    f"{current:.8e}", f"{abs(current):.8e}",
+                ])
     return path
