@@ -48,19 +48,26 @@ C = {
 
 
 # ---------------------------------------------------------------------------
-# Fast algebraic connectivity (NetworkX sparse solver, not dense eig)
+# Conductance-weighted spectral connectivity from the canonical circuit
 # ---------------------------------------------------------------------------
 
-def _fast_alg_conn(G_sub: nx.Graph) -> float:
-    if G_sub.number_of_nodes() < 2:
+def _fast_alg_conn(net: NanoparticleNetwork, activated_nodes: set) -> float:
+    """Smallest positive eigenvalue of the same Laplacian used for transport."""
+    system = net.build_active_laplacian(activated_nodes)
+    if system is None:
+        return float("nan")
+    matrix = system["laplacian"].toarray()
+    if matrix.shape[0] < 2:
         return float("nan")
     try:
-        return float(nx.algebraic_connectivity(G_sub, method="tracemin_pcg"))
-    except Exception:
-        try:
-            return float(nx.algebraic_connectivity(G_sub))
-        except Exception:
+        ev = np.linalg.eigvalsh(0.5 * (matrix + matrix.T))
+        emax = float(ev[-1]) if len(ev) else 0.0
+        if emax <= 0:
             return float("nan")
+        positive = ev[ev >= 1e-9 * emax]
+        return float(positive[0]) if len(positive) else float("nan")
+    except Exception:
+        return float("nan")
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +82,7 @@ def _build_network(params: dict) -> NanoparticleNetwork:
         mu_a=params["mu_a"],
         std_a=params["std_a"],
         edge_k=params["edge_k"],
-        node_r_scale=params["node_r_scale"],
+        node_resistance_ohm=params["node_resistance_ohm"],
         connection_radius=params["connection_radius"],
         source_frac=params["source_frac"],
         drain_frac=params["drain_frac"],
@@ -103,8 +110,7 @@ def _run_iv_and_sweep(net: NanoparticleNetwork, params: dict):
         V = float(row["V"])
         activated = {n for n in net.G.nodes() if net.G.nodes[n]["Vth"] <= V}
         if activated:
-            G_sub = net.G.subgraph(activated)
-            row["algebraic_connectivity"] = _fast_alg_conn(G_sub)
+            row["algebraic_connectivity"] = _fast_alg_conn(net, activated)
         else:
             row["algebraic_connectivity"] = float("nan")
 
@@ -112,8 +118,9 @@ def _run_iv_and_sweep(net: NanoparticleNetwork, params: dict):
     fit = _fit_power_law(
         np.asarray(iv["voltages"], float),
         np.asarray(iv["currents"], float),
-        v_step=params["V_step"],
+        V_T=iv["threshold_voltage"],
         v_transition=trans_V,
+        fit_window=10.0,
     )
     return iv, evo, fit
 
@@ -175,9 +182,16 @@ def _restore_net(net_store: dict, params: dict) -> NanoparticleNetwork:
     net.drain_nodes  = drain_nodes
     net.domain       = tuple(domain)
     net.edge_k       = params["edge_k"]
-    net.node_r_scale = params["node_r_scale"]
-    net.r_floor      = 0.5
+    net.node_resistance_ohm = params["node_resistance_ohm"]
+    net.node_r_scale = net.node_resistance_ohm
+    net.r_floor      = 0.0
     net.voids        = []
+    net.requested_void_fraction = float(params.get("fv", 0.0))
+    net.achieved_void_fraction = float(params.get("fv", 0.0))
+    net.source_node = source_nodes[0] if source_nodes else None
+    net.drain_node = drain_nodes[0] if drain_nodes else None
+    net.n_junctions = G.number_of_nodes()
+    net.N = net.n_junctions
     return net
 
 
@@ -458,9 +472,9 @@ def _alg_figure(evo: dict, V_probe: float) -> go.Figure:
                   annotation_font_size=11)
 
     fig.update_layout(
-        title=dict(text="Algebraic Connectivity λ₂ vs Voltage", font=dict(size=13)),
+        title=dict(text="Conductance-weighted λ₂ vs Voltage", font=dict(size=13)),
         xaxis=dict(title="Applied Voltage [V]"),
-        yaxis=dict(title="λ₂ [-]", exponentformat="e"),
+        yaxis=dict(title="λ₂ [S]", exponentformat="e"),
         plot_bgcolor=C["bg"], paper_bgcolor="white",
         margin=dict(l=60, r=15, t=50, b=45),
     )
@@ -526,7 +540,7 @@ PARAMS = [
     ("Std σₐ [V]",              "std", 3.0,   0.5,  0.01, 20.0,  "{:.1f}"),
     # Resistance
     ("Edge k [Ω/m]",            "ek",  2e10,  1e9,  1e6,  1e13,  "{:.2e}"),
-    ("Node r-scale [Ω/V]",      "nrs", 5e8,   1e7,  0.0,  1e12,  "{:.2e}"),
+    ("Junction resistance [Ω]", "nrs", 3.5e9, 1e8,  0.0,  1e12,  "{:.2e}"),
     # Voltage sweep
     ("V start [V]",             "vs",  0.0,   0.5,  0.0,  50.0,  "{:.1f}"),
     ("V max [V]",               "vm",  16.0,  1.0,  1.0,  100.0, "{:.1f}"),
@@ -696,7 +710,7 @@ def _collect_params(L, N, fv, cr, sf, df, mu, std, ek, nrs,
         source_frac=float(sf or 0.15),
         drain_frac=float(df or 0.15),
         mu_a=float(mu or 6.0), std_a=float(std or 3.0),
-        edge_k=float(ek or 2e10), node_r_scale=float(nrs or 5e8),
+        edge_k=float(ek or 2e10), node_resistance_ohm=float(nrs or 3.5e9),
         V_start=float(vs or 0.0), V_max=float(vm or 16.0),
         V_step=float(vstep or 0.5), seed=int(seed or 42),
     )
