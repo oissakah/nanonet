@@ -1,0 +1,27 @@
+network:
+  n_junctions: 500
+  connection_radius: 0.15
+  domain_size: [1.0, 1.0]
+  left_thresh: 0.15
+  right_thresh: 0.85
+
+threshold_distribution:
+  type: normal
+  mean: 7.0
+  std: 2.0
+  min: 0.0
+  max: 20.0
+
+electrical:
+  edge_k: 2.0e10
+  resistance_model: node
+  node_resistance_ohm: 3.5e9
+
+voltage_sweep:
+  V_start: 0.0
+  V_max: 16.0
+  V_step: 0.5
+  fit_window: 10.0
+  target_voltage: 16.0
+
+seeds: [41, 51, 61, 71, 81]
