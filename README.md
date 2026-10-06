@@ -1,39 +1,122 @@
 # nanonet
 
-[![CI](https://github.com/ock-group/nanonet/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ock-group/nanonet/actions/workflows/ci.yml)
+[![CI](https://github.com/oissakah/nanonet/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/oissakah/nanonet/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A Python package for simulating nanoparticle necklace films as spatial graphs, with an interactive web platform for real-time network exploration.
+`nanonet` is a Python package and Dash application for graph-based simulation of electron transport in self-assembled nanoparticle necklace networks.
 
-Nanoparticle necklace films are modelled as random geometric graphs where **nodes** are voltage-activated junctions and **edges** are nanoparticle chain segments. Current transport is solved via Kirchhoff nodal analysis, and the nonlinear I–V characteristics are fitted to a power-law model across three distinct conduction phases.
+This release synchronizes the reusable package with the corrected V14 model developed in [graph-based-nanoparticle-necklace-network](https://github.com/oissakah/graph-based-nanoparticle-necklace-network).
 
----
+## Corrected transport model
 
-## Model overview
+The network is a spatial random graph. Junction (i) has a phenomenological activation voltage (V_{a,i}). It becomes electrically available when
 
-The film is represented as a 2D graph embedded in a normalised domain. Each node carries a threshold voltage $V_a$ drawn from a Gaussian distribution $\mathcal{N}(\mu_a, \sigma_a^2)$. A node activates (conducts) only when the applied voltage exceeds its threshold. Edges form between nodes within a connection radius and carry a distance-proportional resistance.
+[
+V_{a,i} le V.
+]
 
-**Key parameters**
+Activation and resistance are **independent**. A junction has a fixed resistance
 
-| Parameter | Symbol | Description |
-|---|---|---|
-| Domain size | $L$ | Side length of the square domain (normalised) |
-| Junction count | $N$ | Number of junction nodes |
-| Void fraction | $f_v$ | Area fraction occupied by insulating voids |
-| Mean activation voltage | $\mu_a$ | Mean of the $V_a$ distribution [V] |
-| Std activation voltage | $\sigma_a$ | Standard deviation of the $V_a$ distribution [V] |
-| Edge resistance constant | `edge_k` | $R_\mathrm{edge} =$ `edge_k` $\times\ d$ [Ω/m] |
-| Node resistance scale | `node_r_scale` | $R_\mathrm{node} =$ `node_r_scale` $\times \max(V_a, r_\mathrm{floor})$ [Ω/V] |
+[
+R_{mathrm{node},i}=R_{mathrm{node}},
+]
 
-**I–V phases**
+and an active connection (i-j) uses
 
-- **Phase I** — zero current; no percolating path exists
-- **Phase II** — nonlinear conduction; fitted to $I = A(V - V_T)^\zeta$
-- **Phase III** — quasi-linear; begins when 90 % of nodes have activated
+[
+R_{ij}=R_{mathrm{edge},ij}
++rac{1}{2}R_{mathrm{node},i}
++rac{1}{2}R_{mathrm{node},j},
+]
 
-The Phase II fit window is bounded below by the percolation onset voltage and above by the 90 %-activation voltage.
+with electrode-node junction resistance omitted. The resulting passive circuit is represented by one symmetric conductance-weighted Laplacian and solved using Kirchhoff nodal analysis.
 
----
+The same solution is used for device current, source current, drain current, edge currents, effective resistance, and spectral diagnostics.
+
+### Production defaults
+
+| Parameter | Default |
+|---|---:|
+| Junction count (N) | 500 |
+| Connection radius (r_c) | 0.15 |
+| Domain | (1	imes1) |
+| Edge resistance constant | (2.0	imes10^{10}) |
+| Fixed junction resistance | (3.5	imes10^9 Omega) |
+| Source / drain strips | 0.15 / 0.15 |
+| Voltage sweep | 0–16 V in 0.5 V steps |
+| Activation bounds | 0–20 V |
+| Seeds | 41, 51, 61, 71, 81 |
+
+See `optimized_config.yaml`.
+
+## Threshold and nonlinear fit convention
+
+The transport threshold is not a free fit parameter. It is defined as the first sampled source-drain percolation voltage:
+
+[
+V_T equiv V_{mathrm{perc}}.
+]
+
+The nonlinear region is fitted to
+
+[
+I=A(V-V_T)^zeta
+]
+
+using only positive-current points strictly above (V_T). (V_T) remains fixed while (A) and (zeta) are fitted. The upper fit boundary is the first voltage at which 90% of nodes are active; if that point is not reached, the configured fit-window limit is used.
+
+## Current participation ratio
+
+The package reports the current participation ratio
+
+[
+N_{mathrm{eff}}
+=
+rac{left(sum_e |I_e|ight)^2}
+     {sum_e I_e^2}.
+]
+
+It estimates the effective number of conducting edges sharing the current. A small (N_{mathrm{eff}}) means strongly localized transport; a larger value means current is distributed across more of the conducting network.
+
+The sweep table exposes the same quantity as `participation_ratio`, `current_participation_ratio`, and `N_eff` for compatibility.
+
+## Independent pathways
+
+At (V_{mathrm{perc}}), `nanonet` reports the maximum number of **edge-disjoint** source-to-drain transport channels. It is computed using a unit-capacity max-flow/min-cut calculation and is not a count of all simple paths.
+
+## Spectral diagnostics
+
+Spectral quantities come from the exact same active-circuit Laplacian used for transport. Raw (lambda_2) therefore has conductance units:
+
+[
+[lambda_2]=mathrm{S}.
+]
+
+The package also reports (lambda_2/lambda_{max}) as a dimensionless spectral-gap ratio.
+
+## Density studies
+
+When (N) is varied, the domain and connection radius remain fixed. The standard density studies use
+
+[
+r_c=0.15
+]
+
+for every (N). No (N^{-1/2}) radius rescaling is applied.
+
+Two density runners are available:
+
+- `run_sweep_vary_N_mean`: crossed (N	imeslangle V_aangle) study at fixed (sigma_a)
+- `run_sweep_vary_N`: (N)-only study at fixed (langle V_aangle) and (sigma_a)
+
+## Void fraction
+
+For random-void simulations the package stores both:
+
+- `void_fraction_requested`
+- `void_fraction_achieved`
+
+The achieved value is estimated from the union of the void areas, so overlaps are counted only once.
 
 ## Installation
 
@@ -41,112 +124,127 @@ The Phase II fit window is bounded below by the percolation onset voltage and ab
 pip install -e .
 ```
 
-Requires Python ≥ 3.9. Dependencies are listed in `requirements.txt` and `pyproject.toml`.
+For development and tests:
 
----
+```bash
+pip install -e ".[dev]"
+pytest -q
+```
+
+Python 3.9 or newer is required.
 
 ## Quick start
 
 ```python
-from nanonet import NanoparticleNetwork, sweep, plot_iv_curve
+from nanonet import NanoparticleNetwork, sweep
 
-# Build a network
-net = NanoparticleNetwork(L=1.0, N=300, fv=0.0, mu_a=6.0, std_a=3.0).build(seed=42)
+net = NanoparticleNetwork(
+    L=1.0,
+    N=500,
+    fv=0.0,
+    mu_a=7.0,
+    std_a=2.0,
+    connection_radius=0.15,
+    edge_k=2.0e10,
+    node_resistance_ohm=3.5e9,
+).build(seed=41)
 
-# I–V curve
 iv = net.iv_curve(V_start=0.0, V_max=16.0, V_step=0.5)
-print("Threshold voltage:", iv["threshold_voltage"], "V")
+print("V_perc =", iv["percolation_voltage"])
 
-# Microscopic analysis at one voltage
-mic = net.edge_currents(V_applied=8.0)
-print("Total current:", mic["total_current"], "A")
-print("Conducting edges:", mic["conducting_edges"])
+result = sweep(
+    net,
+    V_start=0.0,
+    V_max=16.0,
+    V_step=0.5,
+)
 
-# Full sweep with connectivity metrics
-result = sweep(net, V_start=0.0, V_max=16.0, V_step=0.5)
+for row in result["rows"]:
+    if row["source_drain_connected"]:
+        print("V =", row["V"])
+        print("I =", row["total_current_A"])
+        print("N_eff =", row["N_eff"])
+        print("edge-disjoint pathways =", row["edge_disjoint_pathways_at_Vperc"])
+        break
 ```
 
-See `tutorial.ipynb` for a complete walkthrough including parameter sweeps and visualisation.
+## Parameter sweeps
 
----
+```python
+from nanonet import (
+    SweepConfig,
+    run_sweep_vary_std,
+    run_sweep_vary_mean,
+    run_sweep_vary_N_mean,
+    run_sweep_vary_N,
+    run_sweep_vary_voids,
+)
 
-## Web platform
+cfg = SweepConfig(
+    node_resistance_ohm=3.5e9,
+    connection_radius=0.15,
+    seeds=[41, 51, 61, 71, 81],
+)
 
-An interactive browser-based platform is included for real-time network exploration.
+density_map = run_sweep_vary_N_mean(cfg)
+```
+
+## Interactive web app
+
+Run:
 
 ```bash
 python app.py
 ```
 
-Then open **http://127.0.0.1:8050** in your browser.
+and open `http://127.0.0.1:8050`.
 
-**Controls (left sidebar)**
-
-| Section | Parameters |
-|---|---|
-| Network Geometry | $L$, $N$, $f_v$, connection radius, source/drain fraction |
-| Activation Voltage | $\mu_a$, $\sigma_a$ |
-| Resistance Model | `edge_k`, `node_r_scale` |
-| Voltage Sweep | $V_\mathrm{start}$, $V_\mathrm{max}$, $V_\mathrm{step}$ |
-| Reproducibility | Random seed |
-
-**Buttons**
-
-- **Preview Network** — instantly renders the network topology (no sweep)
-- **Build & Run I-V Sweep** — builds the network and runs the full voltage sweep
-
-**Output panels**
-
-- **Network graph** — nodes coloured by activation state; edges coloured by current magnitude at the probe voltage
-- **I–V curve** — raw data with Phase I/II/III shading and power-law fit overlay
-- **Algebraic connectivity λ₂ vs voltage** — Fiedler value growth across the sweep
-- **Statistics panel** — phase boundary voltages, fit parameters ($V_T$, $\zeta$, $R^2$), and network summary
-
-The **probe voltage slider** scrubs through the already-computed sweep to inspect any voltage snapshot without rerunning the simulation.
-
----
+The resistance control is **Junction resistance [Ω]** rather than an activation-dependent resistance scale. The web app uses the same fixed-(V_T) fit convention and the same conductance-weighted circuit Laplacian as the package solver.
 
 ## Package structure
 
-```
+```text
 nanonet/
 ├── core/
-│   └── network.py          — NanoparticleNetwork class
+│   └── network.py
 ├── analysis/
-│   ├── sweep.py            — per-voltage activation and current sweep
-│   └── spectral.py         — algebraic connectivity, effective resistance
+│   ├── sweep.py
+│   └── spectral.py
 ├── sweeps/
-│   └── parameter_sweep.py  — SweepConfig and parameter sweep runners
+│   └── parameter_sweep.py
 ├── visualization/
-│   └── plots.py            — matplotlib plot functions
-└── io.py                   — CSV and pickle I/O helpers
+│   └── plots.py
+└── io.py
+
+docs/
+└── MODEL_CORRECTIONS.md
+
+tests/
+├── test_model_consistency.py
+├── test_threshold_convention.py
+└── test_N_density_definition.py
 ```
 
----
+## Model corrections
 
-## Parameter sweeps
+The complete consistency checklist is in [docs/MODEL_CORRECTIONS.md](docs/MODEL_CORRECTIONS.md).
 
-```python
-from nanonet import SweepConfig, run_sweep_vary_std, run_all_cases
+## Research reference
 
-cfg = SweepConfig(
-    N=500, mu_a=6.0,
-    sigma_values=[1.0, 3.0, 5.0, 7.0],
-    fixed_mean=6.0,
-    seeds=[41, 51, 61, 71, 81],
-)
-results = run_sweep_vary_std(cfg)
+The synchronized research implementation is associated with:
+
+> Obed Issakah, Srivathsan Badrinarayanan, Ravi F. Saraf, and Janghoon Ock, “Graph-Based Kirchhoff Modeling of Non-Ohmic Electron Transport in Self-Assembled Nanonecklace Networks,” arXiv:2607.03698 (2026), DOI: 10.48550/arXiv.2607.03698.
+
+```bibtex
+@article{issakah2026nanonecklace,
+  title={Graph-Based Kirchhoff Modeling of Non-Ohmic Electron Transport in Self-Assembled Nanonecklace Networks},
+  author={Issakah, Obed and Badrinarayanan, Srivathsan and Saraf, Ravi F. and Ock, Janghoon},
+  journal={arXiv preprint arXiv:2607.03698},
+  year={2026},
+  doi={10.48550/arXiv.2607.03698}
+}
 ```
 
-Available sweep runners:
+## License
 
-| Function | Varies |
-|---|---|
-| `run_sweep_vary_std` | $\sigma_a$ at fixed $\mu_a$ and $N$ |
-| `run_sweep_vary_mean` | $\mu_a$ at each $\sigma_a$ |
-| `run_sweep_vary_N` | $N$ at fixed $\mu_a$ and $\sigma_a$ |
-| `run_sweep_vary_voids` | void fraction $f_v$ at fixed $N$, $\mu_a$, $\sigma_a$ |
-| `run_all_cases` | all of the above |
-
----
-
+MIT. See `LICENSE`.
